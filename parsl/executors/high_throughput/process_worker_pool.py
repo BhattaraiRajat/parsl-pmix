@@ -10,6 +10,8 @@ import pickle
 import time
 import queue
 import uuid
+import subprocess
+import copy
 from threading import Thread
 from typing import Sequence, Optional
 
@@ -413,6 +415,25 @@ class Manager:
 
         logger.critical("Exiting")
 
+    @wrap_with_logs
+    def start_dvms(self):
+        if os.environ.get('SCRIPTDIR'):
+            script_dir = os.environ['SCRIPTDIR']
+            logger.info("PRRTE DVM Starting")
+            # run DVM
+            local_env = os.environ.copy()
+            envs = copy.deepcopy(local_env)
+            dvm_path = "{0}/dvm.uri".format(script_dir)
+            hostfile_dir = os.environ['HOSTFILE']
+            cmd =  "prte --report-uri {0} --hostfile {1} --prtemca plm ^slurm --daemonize".format(dvm_path, hostfile_dir)
+            logger.info(cmd)
+            proc = subprocess.run(
+                cmd,
+                env=envs, 
+                capture_output = True,
+                shell=True
+            )
+
     def start(self):
         """ Start the worker processes.
 
@@ -421,6 +442,9 @@ class Manager:
         start = time.time()
         self._kill_event = threading.Event()
         self._tasks_in_progress = multiprocessing.Manager().dict()
+
+        # start dvm
+        self.start_dvms()
 
         self.procs = {}
         for worker_id in range(self.worker_count):
