@@ -248,7 +248,7 @@ class Manager:
         logger.debug("Sent heartbeat")
 
     @wrap_with_logs
-    def pull_tasks(self, kill_event):
+    def pull_tasks(self, kill_event, expand_event):
         """ Pull tasks from the incoming tasks zmq pipe onto the internal
         pending task queue
 
@@ -256,6 +256,8 @@ class Manager:
         -----------
         kill_event : threading.Event
               Event to let the thread know when it is time to die.
+        expand_event : threading.Event
+              Event to let the thread know when it is time to expand.
         """
         logger.info("starting")
         poller = zmq.Poller()
@@ -303,6 +305,9 @@ class Manager:
                     logger.debug("Got executor tasks: {}, cumulative count of tasks: {}".format([t['task_id'] for t in tasks], task_recv_counter))
 
                     for task in tasks:
+                        # when manager pulls this many tasks, start expand
+                        if(int(task['task_id']) == 16):
+                            expand_event.set()
                         self.pending_task_queue.put(task)
                         # logger.debug("Ready tasks: {}".format(
                         #    [i['task_id'] for i in self.pending_task_queue]))
@@ -323,13 +328,15 @@ class Manager:
                     break
 
     @wrap_with_logs
-    def push_results(self, kill_event):
+    def push_results(self, kill_event, expand_event):
         """ Listens on the pending_result_queue and sends out results via zmq
 
         Parameters:
         -----------
         kill_event : threading.Event
               Event to let the thread know when it is time to die.
+        expand_event : threading.Event
+              Event to let the thread know when it is time to expand.
         """
 
         logger.debug("Starting result push thread")
@@ -345,6 +352,13 @@ class Manager:
             try:
                 logger.debug("Starting pending_result_queue get")
                 r = self.pending_result_queue.get(block=True, timeout=push_poll_period)
+
+                # check if expanding task done and clear expand flag to let other workers work
+                if  expand_event.is_set():
+                    result_after_expand = pickle.loads(r)
+                    if(int(result_after_expand['task_id']) == 16):
+                        expand_event.clear()
+
                 logger.debug("Got a result item")
                 items.append(r)
             except queue.Empty:
@@ -372,19 +386,22 @@ class Manager:
         logger.critical("Exiting")
 
     @wrap_with_logs
-    def worker_watchdog(self, kill_event):
+    def worker_watchdog(self, kill_event, expand_event):
         """Keeps workers alive.
 
         Parameters:
         -----------
         kill_event : threading.Event
               Event to let the thread know when it is time to die.
+        expand_event : threading.Event
+              Event to let the thread know when it is time to expand.
         """
 
         logger.debug("Starting worker watchdog")
 
         while not kill_event.is_set():
-            for worker_id, p in self.procs.items():
+            # self.procs may get modified while expanding, so use a copy
+            for worker_id, p in self.procs.copy().items():
                 if not p.is_alive():
                     logger.error("Worker {} has died".format(worker_id))
                     try:
@@ -407,7 +424,8 @@ class Manager:
                                                             self.pending_result_queue,
                                                             self.ready_worker_queue,
                                                             self._tasks_in_progress,
-                                                            self.cpu_affinity),
+                                                            self.cpu_affinity,
+                                                            expand_event),
                                        name="HTEX-Worker-{}".format(worker_id))
                     self.procs[worker_id] = p
                     logger.info("Worker {} has been restarted".format(worker_id))
@@ -416,15 +434,47 @@ class Manager:
         logger.critical("Exiting")
 
     @wrap_with_logs
-    def start_dvms(self):
-        if os.environ.get('SCRIPTDIR'):
-            script_dir = os.environ['SCRIPTDIR']
-            logger.info("PRRTE DVM Starting")
+    def worker_expand(self, kill_event, expand_event):
+        """Increase number of workers.
+
+        Parameters:
+        -----------
+        kill_event : threading.Event
+              Event to let the thread know when it is time to die.
+        expand_event : threading.Event
+              Event to let the thread know when it is time to increase workers.
+        """
+
+        while not kill_event.is_set():
+            if  expand_event.is_set():
+                logger.debug("Starting worker Expand")
+                self.worker_count += 1
+                p = self.mpProcess(target=worker, args=(self.worker_count-1,
+                                                                self.uid,
+                                                                self.worker_count,
+                                                                self.pending_task_queue,
+                                                                self.pending_result_queue,
+                                                                self.ready_worker_queue,
+                                                                self._tasks_in_progress,
+                                                                self.cpu_affinity,
+                                                                threading.Event(),
+                                                                None),
+                                        name="HTEX-Worker-{}".format(self.worker_count-1))
+                p.start()
+                self.procs[self.worker_count-1] = p
+                logger.info("Worker {} has been started".format(self.worker_count-1))
+                # wait for expand event to clear after forking the worker
+                while(expand_event.is_set()):
+                    pass
+
+    @wrap_with_logs
+    def start_dvm(self):
+        if os.environ.get('DVMURI'):
             # run DVM
             local_env = os.environ.copy()
             envs = copy.deepcopy(local_env)
-            dvm_path = "{0}/dvm.uri".format(script_dir)
-            hostfile_dir = os.environ['HOSTFILE']
+            dvm_path = os.environ['DVMURI']
+            hostfile_dir = os.environ['TRUNCATED_HOSTFILE']
             cmd =  "prte --report-uri {0} --hostfile {1} --prtemca plm ^slurm --daemonize".format(dvm_path, hostfile_dir)
             logger.info(cmd)
             proc = subprocess.run(
@@ -433,6 +483,24 @@ class Manager:
                 capture_output = True,
                 shell=True
             )
+            logger.info("PRRTE DVM Started")
+
+    @wrap_with_logs
+    def stop_dvm(self):
+        if os.environ.get('DVMURI'):
+            # stop DVM
+            local_env = os.environ.copy()
+            envs = copy.deepcopy(local_env)
+            dvm_path = os.environ['DVMURI']
+            cmd =  "pterm --report-uri file:{0}".format(dvm_path)
+            logger.info(cmd)
+            proc = subprocess.run(
+                cmd,
+                env=envs, 
+                capture_output = True,
+                shell=True
+            )
+            logger.info("PRRTE DVM Terminated")
 
     def start(self):
         """ Start the worker processes.
@@ -441,10 +509,11 @@ class Manager:
         """
         start = time.time()
         self._kill_event = threading.Event()
+        self._expand_event = multiprocessing.Event()
         self._tasks_in_progress = multiprocessing.Manager().dict()
 
         # start dvm
-        self.start_dvms()
+        self.start_dvm()
 
         self.procs = {}
         for worker_id in range(self.worker_count):
@@ -457,6 +526,7 @@ class Manager:
                                      self.ready_worker_queue,
                                      self._tasks_in_progress,
                                      self.cpu_affinity,
+                                     self._expand_event,
                                      self.available_accelerators[worker_id] if self.accelerators_available else None),
                                name="HTEX-Worker-{}".format(worker_id))
             p.start()
@@ -465,28 +535,37 @@ class Manager:
         logger.debug("Workers started")
 
         self._task_puller_thread = threading.Thread(target=self.pull_tasks,
-                                                    args=(self._kill_event,),
+                                                    args=(self._kill_event,self._expand_event),
                                                     name="Task-Puller")
         self._result_pusher_thread = threading.Thread(target=self.push_results,
-                                                      args=(self._kill_event,),
+                                                      args=(self._kill_event, self._expand_event),
                                                       name="Result-Pusher")
         self._worker_watchdog_thread = threading.Thread(target=self.worker_watchdog,
-                                                        args=(self._kill_event,),
+                                                        args=(self._kill_event, self._expand_event),
                                                         name="worker-watchdog")
+        self._worker_expand_thread = threading.Thread(target=self.worker_expand,
+                                                        args=(self._kill_event, self._expand_event),
+                                                        name="worker-expand")
         self._task_puller_thread.start()
         self._result_pusher_thread.start()
         self._worker_watchdog_thread.start()
+        self._worker_expand_thread.start()
 
         logger.info("Loop start")
 
         # TODO : Add mechanism in this loop to stop the worker pool
         # This might need a multiprocessing event to signal back.
+        self._expand_event.wait()
+        logger.info("Received expand event, expanding worker pool")
+
         self._kill_event.wait()
-        logger.critical("Received kill event, terminating worker processes")
+        logger.critical("Received kill event, terminating worker pool")
 
         self._task_puller_thread.join()
         self._result_pusher_thread.join()
         self._worker_watchdog_thread.join()
+        self._worker_expand_thread.join()
+
         for proc_id in self.procs:
             self.procs[proc_id].terminate()
             logger.critical("Terminating worker {}: is_alive()={}".format(self.procs[proc_id],
@@ -497,6 +576,7 @@ class Manager:
         self.task_incoming.close()
         self.result_outgoing.close()
         self.context.term()
+        self.stop_dvm()
         delta = time.time() - start
         logger.info("process_worker_pool ran for {} seconds".format(delta))
         return
@@ -532,7 +612,7 @@ def execute_task(bufs):
 
 
 @wrap_with_logs(target="worker_log")
-def worker(worker_id, pool_id, pool_size, task_queue, result_queue, worker_queue, tasks_in_progress, cpu_affinity, accelerator: Optional[str]):
+def worker(worker_id, pool_id, pool_size, task_queue, result_queue, worker_queue, tasks_in_progress, cpu_affinity, expand_event, accelerator: Optional[str]):
     """
 
     Put request token into queue
@@ -602,42 +682,53 @@ def worker(worker_id, pool_id, pool_size, task_queue, result_queue, worker_queue
         logger.info(f'Pinned worker to accelerator: {accelerator}')
 
     while True:
-        worker_queue.put(worker_id)
-
-        # The worker will receive {'task_id':<tid>, 'buffer':<buf>}
-        req = task_queue.get()
-        tasks_in_progress[worker_id] = req
-        tid = req['task_id']
-        logger.info("Received executor task {}".format(tid))
-
-        try:
-            worker_queue.get()
-        except queue.Empty:
-            logger.warning("Worker ID: {} failed to remove itself from ready_worker_queue".format(worker_id))
-            pass
-
-        try:
-            result = execute_task(req['buffer'])
-            serialized_result = serialize(result, buffer_threshold=1000000)
-        except Exception as e:
-            logger.info('Caught an exception: {}'.format(e))
-            result_package = {'type': 'result', 'task_id': tid, 'exception': serialize(RemoteExceptionWrapper(*sys.exc_info()))}
+        if expand_event.is_set():
+            logger.info("Waiting for expand event to finish from worker {}".format(worker_id))
+            while(expand_event.is_set()):
+                pass
         else:
-            result_package = {'type': 'result', 'task_id': tid, 'result': serialized_result}
-            # logger.debug("Result: {}".format(result))
+            worker_queue.put(worker_id)
 
-        logger.info("Completed executor task {}".format(tid))
-        try:
-            pkl_package = pickle.dumps(result_package)
-        except Exception:
-            logger.exception("Caught exception while trying to pickle the result package")
-            pkl_package = pickle.dumps({'type': 'result', 'task_id': tid,
-                                        'exception': serialize(RemoteExceptionWrapper(*sys.exc_info()))
-            })
+            # The worker will receive {'task_id':<tid>, 'buffer':<buf>}
+            req = task_queue.get()
+            tasks_in_progress[worker_id] = req
+            tid = req['task_id']
 
-        result_queue.put(pkl_package)
-        tasks_in_progress.pop(worker_id)
-        logger.info("All processing finished for executor task {}".format(tid))
+            # run add-hostfile task alone
+            if(int(tid)==16):
+                while(len(tasks_in_progress) != 1):
+                    pass
+    
+            logger.info("Received executor task {}".format(tid))
+
+            try:
+                worker_queue.get()
+            except queue.Empty:
+                logger.warning("Worker ID: {} failed to remove itself from ready_worker_queue".format(worker_id))
+                pass
+
+            try:
+                result = execute_task(req['buffer'])
+                serialized_result = serialize(result, buffer_threshold=1000000)
+            except Exception as e:
+                logger.info('Caught an exception: {}'.format(e))
+                result_package = {'type': 'result', 'task_id': tid, 'exception': serialize(RemoteExceptionWrapper(*sys.exc_info()))}
+            else:
+                result_package = {'type': 'result', 'task_id': tid, 'result': serialized_result}
+                # logger.debug("Result: {}".format(result))
+
+            logger.info("Completed executor task {}".format(tid))
+            try:
+                pkl_package = pickle.dumps(result_package)
+            except Exception:
+                logger.exception("Caught exception while trying to pickle the result package")
+                pkl_package = pickle.dumps({'type': 'result', 'task_id': tid,
+                                            'exception': serialize(RemoteExceptionWrapper(*sys.exc_info()))
+                })
+
+            result_queue.put(pkl_package)
+            tasks_in_progress.pop(worker_id)
+            logger.info("All processing finished for executor task {}".format(tid))
 
 
 def start_file_logger(filename, rank, name='parsl', level=logging.DEBUG, format_string=None):

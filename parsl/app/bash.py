@@ -68,22 +68,22 @@ def remote_side_bash_executor(func, *args, **kwargs):
     std_err = open_std_fd('stderr')
     timeout = kwargs.get('walltime')
 
-    if os.environ.get('DVMURI') and 'prun' in executable:
+    if os.environ.get('DVMURI'):
         dvm_path = os.environ.get('DVMURI')
+        task_id = int(args[1])
+        # expand after certain task
+        if task_id == 16:
+            add_hostfile_path = os.environ.get('ADDHOSTFILE')
+            prun_command = "prun --dvm-uri file:{0} --add-hostfile {1} --hostfile {1} ".format(dvm_path, add_hostfile_path)
+            executable = executable.replace("prun ", prun_command)
+        # manual mapping nodes to task example, prrte and parsl do not have scheduler for mapping tasks to node
+        elif task_id > 16 and task_id % 4 == 0:
+            add_hostfile_path = os.environ.get('ADDHOSTFILE')
+            prun_command = "prun --dvm-uri file:{0} --hostfile {1} ".format(dvm_path, add_hostfile_path)
+            executable = executable.replace("prun ", prun_command)
+        else:
             prun_command = "prun --dvm-uri file:{0} ".format(dvm_path)
             executable = executable.replace("prun ", prun_command)
-        # task_id = int(args[1])
-        # if task_id == 0:
-        #     add_hostfile_path = os.environ.get('ADDHOSTFILE')
-        #     prun_command = "prun --dvm-uri file:{0} --add-hostfile {1} --hostfile {1} ".format(dvm_path, add_hostfile_path)
-        #     executable = executable.replace("prun ", prun_command)
-        # elif task_id == 1:
-        #     hostfile_path1 = os.environ.get('HOSTFILE1')
-        #     prun_command = "prun --dvm-uri file:{0} --hostfile {1} ".format(dvm_path, hostfile_path1)
-        #     executable = executable.replace("prun ", prun_command)
-        # else:
-        #     prun_command = "prun --dvm-uri file:{0} ".format(dvm_path)
-        #     executable = executable.replace("prun ", prun_command)
 
     if std_err is not None:
         print('--> executable follows <--\n{0}\n--> end executable <--'.format(executable), file=std_err, flush=True)

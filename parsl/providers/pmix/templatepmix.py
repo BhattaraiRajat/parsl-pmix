@@ -12,13 +12,15 @@ ${worker_init}
 
 export JOBNAME="${jobname}"
 
-export SCRIPTDIR=${submit_script_dir}
+scontrol show hostnames > ${submit_script_dir}/hostfile
 
-export HOSTFILE=/home/rbhattara/parsl/hostfiles/truncated_hostfile
+tail -1 ${submit_script_dir}/hostfile > ${submit_script_dir}/add_hostfile
 
-export HOSTFILE1=/home/rbhattara/parsl/hostfiles/hostfile1
+export ADDHOSTFILE=${submit_script_dir}/add_hostfile
 
-export ADDHOSTFILE=/home/rbhattara/parsl/hostfiles/add_hostfile
+head -n -1 ${submit_script_dir}/hostfile > ${submit_script_dir}/truncated_hostfile
+
+export TRUNCATED_HOSTFILE=${submit_script_dir}/truncated_hostfile
 
 export DVMURI=${submit_script_dir}/dvm.uri
 
