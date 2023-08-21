@@ -176,6 +176,10 @@ class Manager:
         else:
             available_mem_on_node = round(psutil.virtual_memory().available / (2**30), 1)
 
+        self.pmix_run = False
+        if os.environ.get('DVMURI'):
+            self.pmix_run = True
+
         self.max_workers = max_workers
         self.prefetch_capacity = prefetch_capacity
 
@@ -305,9 +309,10 @@ class Manager:
                     logger.debug("Got executor tasks: {}, cumulative count of tasks: {}".format([t['task_id'] for t in tasks], task_recv_counter))
 
                     for task in tasks:
-                        # when manager pulls this many tasks, start expand
-                        if(int(task['task_id']) == 16):
-                            expand_event.set()
+                        if self.pmix_run:
+                            # when manager pulls this many tasks, start expand
+                            if(int(task['task_id']) == 4):
+                                expand_event.set()
                         self.pending_task_queue.put(task)
                         # logger.debug("Ready tasks: {}".format(
                         #    [i['task_id'] for i in self.pending_task_queue]))
@@ -353,11 +358,12 @@ class Manager:
                 logger.debug("Starting pending_result_queue get")
                 r = self.pending_result_queue.get(block=True, timeout=push_poll_period)
 
-                # check if expanding task done and clear expand flag to let other workers work
-                if  expand_event.is_set():
-                    result_after_expand = pickle.loads(r)
-                    if(int(result_after_expand['task_id']) == 16):
-                        expand_event.clear()
+                if self.pmix_run:
+                    # check if expanding task done and clear expand flag to let other workers work
+                    if  expand_event.is_set():
+                        result_after_expand = pickle.loads(r)
+                        if(int(result_after_expand['task_id']) == 4):
+                            expand_event.clear()
 
                 logger.debug("Got a result item")
                 items.append(r)
@@ -457,7 +463,7 @@ class Manager:
                                                                 self.ready_worker_queue,
                                                                 self._tasks_in_progress,
                                                                 self.cpu_affinity,
-                                                                threading.Event(),
+                                                                expand_event,
                                                                 None),
                                         name="HTEX-Worker-{}".format(self.worker_count-1))
                 p.start()
@@ -512,8 +518,9 @@ class Manager:
         self._expand_event = multiprocessing.Event()
         self._tasks_in_progress = multiprocessing.Manager().dict()
 
-        # start dvm
-        self.start_dvm()
+        if self.pmix_run:
+            # start dvm
+            self.start_dvm()
 
         self.procs = {}
         for worker_id in range(self.worker_count):
@@ -543,20 +550,23 @@ class Manager:
         self._worker_watchdog_thread = threading.Thread(target=self.worker_watchdog,
                                                         args=(self._kill_event, self._expand_event),
                                                         name="worker-watchdog")
-        self._worker_expand_thread = threading.Thread(target=self.worker_expand,
-                                                        args=(self._kill_event, self._expand_event),
-                                                        name="worker-expand")
+        if self.pmix_run:
+            self._worker_expand_thread = threading.Thread(target=self.worker_expand,
+                                                            args=(self._kill_event, self._expand_event),
+                                                            name="worker-expand")
         self._task_puller_thread.start()
         self._result_pusher_thread.start()
         self._worker_watchdog_thread.start()
-        self._worker_expand_thread.start()
+        if self.pmix_run:
+            self._worker_expand_thread.start()
 
         logger.info("Loop start")
 
         # TODO : Add mechanism in this loop to stop the worker pool
         # This might need a multiprocessing event to signal back.
-        self._expand_event.wait()
-        logger.info("Received expand event, expanding worker pool")
+        if self.pmix_run:
+            self._expand_event.wait()
+            logger.info("Received expand event, expanding worker pool")
 
         self._kill_event.wait()
         logger.critical("Received kill event, terminating worker pool")
@@ -564,7 +574,9 @@ class Manager:
         self._task_puller_thread.join()
         self._result_pusher_thread.join()
         self._worker_watchdog_thread.join()
-        self._worker_expand_thread.join()
+
+        if self.pmix_run:
+            self._worker_expand_thread.join()
 
         for proc_id in self.procs:
             self.procs[proc_id].terminate()
@@ -576,7 +588,8 @@ class Manager:
         self.task_incoming.close()
         self.result_outgoing.close()
         self.context.term()
-        self.stop_dvm()
+        if self.pmix_run:
+            self.stop_dvm()
         delta = time.time() - start
         logger.info("process_worker_pool ran for {} seconds".format(delta))
         return
@@ -682,7 +695,7 @@ def worker(worker_id, pool_id, pool_size, task_queue, result_queue, worker_queue
         logger.info(f'Pinned worker to accelerator: {accelerator}')
 
     while True:
-        if expand_event.is_set():
+        if expand_event.is_set() and os.environ.get("DVMURI"):
             logger.info("Waiting for expand event to finish from worker {}".format(worker_id))
             while(expand_event.is_set()):
                 pass
@@ -694,11 +707,13 @@ def worker(worker_id, pool_id, pool_size, task_queue, result_queue, worker_queue
             tasks_in_progress[worker_id] = req
             tid = req['task_id']
 
-            # run add-hostfile task alone
-            if(int(tid)==16):
-                while(len(tasks_in_progress) != 1):
-                    pass
-    
+            if os.environ.get("DVMURI"):
+                # run add-hostfile task alone
+                if(int(tid)==4):
+                    logger.info("Waiting for task {0} to run alone from worker {1}".format(tid, worker_id))
+                    while(len(tasks_in_progress) != 1):
+                        pass
+            
             logger.info("Received executor task {}".format(tid))
 
             try:

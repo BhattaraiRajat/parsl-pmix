@@ -42,14 +42,13 @@ class PMIxSlurmProvider(SlurmProvider):
             scheduler_options += '#SBATCH --cpus-per-task={}'.format(cpus_per_task)
             worker_init += 'export PARSL_CORES={}\n'.format(cpus_per_task)
 
-        # export pmix
-        # worker_init += 'export PATH=/users/hpritchard/ompi/install_session_hcoll/bin:$PATH'
-        # worker_init += 'source /home/rbhattara/parsl/venv/bin/activate'
-
         job_name = "{0}.{1}".format(job_name, time.time())
 
         script_path = "{0}/{1}.submit".format(self.script_dir, job_name)
         script_path = os.path.abspath(script_path)
+
+        # ask for one more nodes for DVM expansion
+        self.nodes_per_block = self.nodes_per_block + 1
 
         logger.debug("Requesting one block with {} nodes".format(self.nodes_per_block))
 

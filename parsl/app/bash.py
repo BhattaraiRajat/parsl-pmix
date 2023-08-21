@@ -70,16 +70,22 @@ def remote_side_bash_executor(func, *args, **kwargs):
 
     if os.environ.get('DVMURI'):
         dvm_path = os.environ.get('DVMURI')
+        script_dir = os.environ.get('SCRIPT_DIR')
         task_id = int(args[1])
         # expand after certain task
-        if task_id == 16:
+        if task_id == 4:
             add_hostfile_path = os.environ.get('ADDHOSTFILE')
             prun_command = "prun --dvm-uri file:{0} --add-hostfile {1} --hostfile {1} ".format(dvm_path, add_hostfile_path)
             executable = executable.replace("prun ", prun_command)
         # manual mapping nodes to task example, prrte and parsl do not have scheduler for mapping tasks to node
-        elif task_id > 16 and task_id % 4 == 0:
-            add_hostfile_path = os.environ.get('ADDHOSTFILE')
-            prun_command = "prun --dvm-uri file:{0} --hostfile {1} ".format(dvm_path, add_hostfile_path)
+        elif task_id > 4:
+            hostfile_index=task_id%4
+            if hostfile_index == 0:
+                hostfile_path = os.environ.get('ADDHOSTFILE')
+            else:
+                file_name = "hostfile0{0}".format(hostfile_index-1)
+                hostfile_path = "{0}/{1}".format(script_dir, file_name)
+            prun_command = "prun --map-by :OVERSUBSCRIBE --dvm-uri file:{0} --hostfile {1} ".format(dvm_path, hostfile_path)
             executable = executable.replace("prun ", prun_command)
         else:
             prun_command = "prun --dvm-uri file:{0} ".format(dvm_path)
