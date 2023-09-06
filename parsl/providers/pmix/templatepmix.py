@@ -14,10 +14,6 @@ export JOBNAME="${jobname}"
 
 scontrol show hostnames > ${submit_script_dir}/hostfile
 
-tail -1 ${submit_script_dir}/hostfile > ${submit_script_dir}/add_hostfile
-
-export ADDHOSTFILE=${submit_script_dir}/add_hostfile
-
 head -n -1 ${submit_script_dir}/hostfile > ${submit_script_dir}/truncated_hostfile
 
 export SCRIPT_DIR=${submit_script_dir}
@@ -26,11 +22,7 @@ export TRUNCATED_HOSTFILE=${submit_script_dir}/truncated_hostfile
 
 export DVMURI=${submit_script_dir}/dvm.uri
 
-export OMPI_MCA_pml=^ucx
-
-export PRTE_MCA_ras=simulator
-
-split --numeric-suffixes -l 1 ${submit_script_dir}/truncated_hostfile ${submit_script_dir}/hostfile
+split --numeric-suffixes -l 1 ${submit_script_dir}/hostfile ${submit_script_dir}/hostfile
 
 env | grep SLURM > ${submit_script_dir}/slurmenv
 

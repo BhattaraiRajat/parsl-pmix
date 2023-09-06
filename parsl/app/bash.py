@@ -72,24 +72,27 @@ def remote_side_bash_executor(func, *args, **kwargs):
         dvm_path = os.environ.get('DVMURI')
         script_dir = os.environ.get('SCRIPT_DIR')
         task_id = int(args[1])
-        # expand after certain task
-        if task_id == 4:
-            add_hostfile_path = os.environ.get('ADDHOSTFILE')
-            prun_command = "prun --dvm-uri file:{0} --add-hostfile {1} --hostfile {1} ".format(dvm_path, add_hostfile_path)
-            executable = executable.replace("prun ", prun_command)
+
         # manual mapping nodes to task example, prrte and parsl do not have scheduler for mapping tasks to node
-        elif task_id > 4:
-            hostfile_index=task_id%4
-            if hostfile_index == 0:
-                hostfile_path = os.environ.get('ADDHOSTFILE')
-            else:
-                file_name = "hostfile0{0}".format(hostfile_index-1)
+        hostfile_index=task_id%3
+        file_name = "hostfile0{0}".format(hostfile_index)
+        hostfile_path = "{0}/{1}".format(script_dir, file_name)
+
+        prun_command = "prun --dvm-uri file:{0} --map-by :OVERSUBSCRIBE --hostfile {1} ".format(dvm_path, hostfile_path)
+
+        # expand after certain task
+        if os.environ.get('EXPAND_AT'):
+            expand_at_task = int(os.environ.get('EXPAND_AT'))
+            if task_id == expand_at_task:
+                add_hostfile_path = "{0}/hostfile03".format(script_dir)
+                prun_command = "prun --dvm-uri file:{0} --map-by :OVERSUBSCRIBE --add-hostfile {1} --hostfile {1} ".format(dvm_path, add_hostfile_path)
+            if task_id > expand_at_task:
+                hostfile_index=task_id%4
+                file_name = "hostfile0{0}".format(hostfile_index)
                 hostfile_path = "{0}/{1}".format(script_dir, file_name)
-            prun_command = "prun --map-by :OVERSUBSCRIBE --dvm-uri file:{0} --hostfile {1} ".format(dvm_path, hostfile_path)
-            executable = executable.replace("prun ", prun_command)
-        else:
-            prun_command = "prun --dvm-uri file:{0} ".format(dvm_path)
-            executable = executable.replace("prun ", prun_command)
+                prun_command = "prun --dvm-uri file:{0} --map-by :OVERSUBSCRIBE --hostfile {1} ".format(dvm_path, hostfile_path)  
+
+        executable = executable.replace("prun ", prun_command)
 
     if std_err is not None:
         print('--> executable follows <--\n{0}\n--> end executable <--'.format(executable), file=std_err, flush=True)

@@ -179,6 +179,10 @@ class Manager:
         self.pmix_run = False
         if os.environ.get('DVMURI'):
             self.pmix_run = True
+        
+        self.expand_at = None
+        if os.environ.get('EXPAND_AT'):
+            self.expand_at = int(os.environ.get('EXPAND_AT'))
 
         self.max_workers = max_workers
         self.prefetch_capacity = prefetch_capacity
@@ -309,9 +313,9 @@ class Manager:
                     logger.debug("Got executor tasks: {}, cumulative count of tasks: {}".format([t['task_id'] for t in tasks], task_recv_counter))
 
                     for task in tasks:
-                        if self.pmix_run:
+                        if self.expand_at is not None:
                             # when manager pulls this many tasks, start expand
-                            if(int(task['task_id']) == 4):
+                            if(int(task['task_id']) == self.expand_at):
                                 expand_event.set()
                         self.pending_task_queue.put(task)
                         # logger.debug("Ready tasks: {}".format(
@@ -358,11 +362,11 @@ class Manager:
                 logger.debug("Starting pending_result_queue get")
                 r = self.pending_result_queue.get(block=True, timeout=push_poll_period)
 
-                if self.pmix_run:
+                if self.expand_at is not None:
                     # check if expanding task done and clear expand flag to let other workers work
                     if  expand_event.is_set():
                         result_after_expand = pickle.loads(r)
-                        if(int(result_after_expand['task_id']) == 4):
+                        if(int(result_after_expand['task_id']) == self.expand_at):
                             expand_event.clear()
 
                 logger.debug("Got a result item")
@@ -475,38 +479,40 @@ class Manager:
 
     @wrap_with_logs
     def start_dvm(self):
-        if os.environ.get('DVMURI'):
-            # run DVM
-            local_env = os.environ.copy()
-            envs = copy.deepcopy(local_env)
-            dvm_path = os.environ['DVMURI']
+        # run DVM
+        local_env = os.environ.copy()
+        envs = copy.deepcopy(local_env)
+        dvm_path = os.environ['DVMURI']
+        if self.expand_at is not None:
             hostfile_dir = os.environ['TRUNCATED_HOSTFILE']
-            cmd =  "prte --report-uri {0} --hostfile {1} --prtemca plm ^slurm --daemonize".format(dvm_path, hostfile_dir)
-            logger.info(cmd)
-            proc = subprocess.run(
-                cmd,
-                env=envs, 
-                capture_output = True,
-                shell=True
-            )
-            logger.info("PRRTE DVM Started")
+        else:
+            script_dir = os.environ['SCRIPT_DIR']
+            hostfile_dir = "{0}/hostfile".format(script_dir)
+        cmd =  "prte --report-uri {0} --hostfile {1} --prtemca plm ^slurm --daemonize".format(dvm_path, hostfile_dir)
+        logger.info(cmd)
+        proc = subprocess.run(
+            cmd,
+            env=envs, 
+            capture_output = True,
+            shell=True
+        )
+        logger.info("PRRTE DVM Started")
 
     @wrap_with_logs
     def stop_dvm(self):
-        if os.environ.get('DVMURI'):
-            # stop DVM
-            local_env = os.environ.copy()
-            envs = copy.deepcopy(local_env)
-            dvm_path = os.environ['DVMURI']
-            cmd =  "pterm --report-uri file:{0}".format(dvm_path)
-            logger.info(cmd)
-            proc = subprocess.run(
-                cmd,
-                env=envs, 
-                capture_output = True,
-                shell=True
-            )
-            logger.info("PRRTE DVM Terminated")
+        # stop DVM
+        local_env = os.environ.copy()
+        envs = copy.deepcopy(local_env)
+        dvm_path = os.environ['DVMURI']
+        cmd =  "pterm --report-uri file:{0}".format(dvm_path)
+        logger.info(cmd)
+        proc = subprocess.run(
+            cmd,
+            env=envs, 
+            capture_output = True,
+            shell=True
+        )
+        logger.info("PRRTE DVM Terminated")
 
     def start(self):
         """ Start the worker processes.
@@ -550,21 +556,21 @@ class Manager:
         self._worker_watchdog_thread = threading.Thread(target=self.worker_watchdog,
                                                         args=(self._kill_event, self._expand_event),
                                                         name="worker-watchdog")
-        if self.pmix_run:
+        if self.expand_at is not None:
             self._worker_expand_thread = threading.Thread(target=self.worker_expand,
                                                             args=(self._kill_event, self._expand_event),
                                                             name="worker-expand")
         self._task_puller_thread.start()
         self._result_pusher_thread.start()
         self._worker_watchdog_thread.start()
-        if self.pmix_run:
+        if self.expand_at is not None:
             self._worker_expand_thread.start()
 
         logger.info("Loop start")
 
         # TODO : Add mechanism in this loop to stop the worker pool
         # This might need a multiprocessing event to signal back.
-        if self.pmix_run:
+        if self.expand_at is not None:
             self._expand_event.wait()
             logger.info("Received expand event, expanding worker pool")
 
@@ -575,7 +581,7 @@ class Manager:
         self._result_pusher_thread.join()
         self._worker_watchdog_thread.join()
 
-        if self.pmix_run:
+        if self.expand_at is not None:
             self._worker_expand_thread.join()
 
         for proc_id in self.procs:
@@ -695,7 +701,7 @@ def worker(worker_id, pool_id, pool_size, task_queue, result_queue, worker_queue
         logger.info(f'Pinned worker to accelerator: {accelerator}')
 
     while True:
-        if expand_event.is_set() and os.environ.get("DVMURI"):
+        if expand_event.is_set():
             logger.info("Waiting for expand event to finish from worker {}".format(worker_id))
             while(expand_event.is_set()):
                 pass
@@ -707,9 +713,9 @@ def worker(worker_id, pool_id, pool_size, task_queue, result_queue, worker_queue
             tasks_in_progress[worker_id] = req
             tid = req['task_id']
 
-            if os.environ.get("DVMURI"):
+            if os.environ.get("EXPAND_AT"):
                 # run add-hostfile task alone
-                if(int(tid)==4):
+                if(int(tid)==int(os.environ.get("EXPAND_AT"))):
                     logger.info("Waiting for task {0} to run alone from worker {1}".format(tid, worker_id))
                     while(len(tasks_in_progress) != 1):
                         pass

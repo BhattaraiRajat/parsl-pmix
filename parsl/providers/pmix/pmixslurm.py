@@ -4,17 +4,69 @@ import time
 import re
 import logging
 
+import typeguard
+
+from typing import Optional
+
 from parsl.launchers.base import Launcher
 from parsl.providers.base import JobState, JobStatus
 from parsl.utils import wtime_to_minutes
 from parsl.providers.slurm.slurm import SlurmProvider
 from parsl.providers.pmix.templatepmix import template_string
 
+from parsl.channels import LocalChannel
+from parsl.channels.base import Channel
+from parsl.launchers import SingleNodeLauncher
+
 logger = logging.getLogger(__name__)
 
 class PMIxSlurmProvider(SlurmProvider):
     """PMIx Slurm Execution Provider
     """
+    @typeguard.typechecked
+    def __init__(self,
+                 partition: Optional[str] = None,
+                 account: Optional[str] = None,
+                 channel: Channel = LocalChannel(),
+                 nodes_per_block: int = 1,
+                 cores_per_node: Optional[int] = None,
+                 mem_per_node: Optional[int] = None,
+                 expand_at: Optional[int] = None,
+                 init_blocks: int = 1,
+                 min_blocks: int = 0,
+                 max_blocks: int = 1,
+                 parallelism: float = 1,
+                 walltime: str = "00:10:00",
+                 scheduler_options: str = '',
+                 regex_job_id: str = r"Submitted batch job (?P<id>\S*)",
+                 worker_init: str = '',
+                 cmd_timeout: int = 10,
+                 exclusive: bool = True,
+                 move_files: bool = True,
+                 launcher: Launcher = SingleNodeLauncher(),):
+        
+        super().__init__(
+                 partition,
+                 account,
+                 channel,
+                 nodes_per_block,
+                 cores_per_node,
+                 mem_per_node,
+                 init_blocks,
+                 min_blocks,
+                 max_blocks,
+                 parallelism,
+                 walltime,
+                 scheduler_options,
+                 regex_job_id,
+                 worker_init,
+                 cmd_timeout,
+                 exclusive,
+                 move_files,
+                 launcher)
+        
+        self.expand_at = expand_at
+        
     def submit(self, command, tasks_per_node, job_name="parsl.slurmpmix"):
         """Submit the command as a slurm job.
 
@@ -42,13 +94,18 @@ class PMIxSlurmProvider(SlurmProvider):
             scheduler_options += '#SBATCH --cpus-per-task={}'.format(cpus_per_task)
             worker_init += 'export PARSL_CORES={}\n'.format(cpus_per_task)
 
+        worker_init += 'export OMPI_MCA_pml=^ucx'
+        worker_init += 'export PRTE_MCA_ras=simulator'
+
         job_name = "{0}.{1}".format(job_name, time.time())
 
         script_path = "{0}/{1}.submit".format(self.script_dir, job_name)
         script_path = os.path.abspath(script_path)
 
-        # ask for one more nodes for DVM expansion
-        self.nodes_per_block = self.nodes_per_block + 1
+        if(self.expand_at is not None):
+            # ask for one more nodes for DVM expansion
+            self.nodes_per_block = self.nodes_per_block + 1
+            worker_init += 'export EXPAND_AT={}\n'.format(self.expand_at)
 
         logger.debug("Requesting one block with {} nodes".format(self.nodes_per_block))
 
