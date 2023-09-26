@@ -68,31 +68,36 @@ def remote_side_bash_executor(func, *args, **kwargs):
     std_err = open_std_fd('stderr')
     timeout = kwargs.get('walltime')
 
+    # manual mapping nodes to task example, mpi runtime, prrte and parsl do not have scheduler for mapping tasks to node
+    user_nodes_count = int(os.environ.get('USER_NODE_COUNT'))
+    script_dir = os.environ.get('SCRIPT_DIR')
+    task_id = int(args[1])
+    hostfile_index=task_id%user_nodes_count
+    file_name = "hostfile0{0}".format(hostfile_index)
+    hostfile_path = "{0}/{1}".format(script_dir, file_name)
+
     if os.environ.get('DVMURI'):
         dvm_path = os.environ.get('DVMURI')
-        script_dir = os.environ.get('SCRIPT_DIR')
-        task_id = int(args[1])
-
-        # manual mapping nodes to task example, prrte and parsl do not have scheduler for mapping tasks to node
-        hostfile_index=task_id%3
-        file_name = "hostfile0{0}".format(hostfile_index)
-        hostfile_path = "{0}/{1}".format(script_dir, file_name)
-
         prun_command = "prun --dvm-uri file:{0} --map-by :OVERSUBSCRIBE --hostfile {1} ".format(dvm_path, hostfile_path)
 
         # expand after certain task
         if os.environ.get('EXPAND_AT'):
             expand_at_task = int(os.environ.get('EXPAND_AT'))
             if task_id == expand_at_task:
-                add_hostfile_path = "{0}/hostfile03".format(script_dir)
+                add_hostfile_path = "{0}/add_hostfile".format(script_dir)
                 prun_command = "prun --dvm-uri file:{0} --map-by :OVERSUBSCRIBE --add-hostfile {1} --hostfile {1} ".format(dvm_path, add_hostfile_path)
             if task_id > expand_at_task:
-                hostfile_index=task_id%4
+                nodes_count = int(os.environ.get('NODES_COUNT'))
+                hostfile_index=task_id%nodes_count
                 file_name = "hostfile0{0}".format(hostfile_index)
                 hostfile_path = "{0}/{1}".format(script_dir, file_name)
                 prun_command = "prun --dvm-uri file:{0} --map-by :OVERSUBSCRIBE --hostfile {1} ".format(dvm_path, hostfile_path)  
 
         executable = executable.replace("prun ", prun_command)
+
+    if "mpirun " in executable:
+        mpirun_command = "mpirun --map-by :OVERSUBSCRIBE --hostfile {0} ".format(hostfile_path)
+        executable = executable.replace("mpirun ", mpirun_command)
 
     if std_err is not None:
         print('--> executable follows <--\n{0}\n--> end executable <--'.format(executable), file=std_err, flush=True)

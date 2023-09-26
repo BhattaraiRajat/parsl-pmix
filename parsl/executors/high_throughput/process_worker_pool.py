@@ -456,24 +456,26 @@ class Manager:
         """
 
         while not kill_event.is_set():
-            if  expand_event.is_set():
+            if expand_event.is_set():
                 logger.debug("Starting worker Expand")
-                self.worker_count += 1
-                p = self.mpProcess(target=worker, args=(self.worker_count-1,
-                                                                self.uid,
-                                                                self.worker_count,
-                                                                self.pending_task_queue,
-                                                                self.pending_result_queue,
-                                                                self.ready_worker_queue,
-                                                                self._tasks_in_progress,
-                                                                self.cpu_affinity,
-                                                                expand_event,
-                                                                None),
-                                        name="HTEX-Worker-{}".format(self.worker_count-1))
-                p.start()
-                self.procs[self.worker_count-1] = p
-                logger.info("Worker {} has been started".format(self.worker_count-1))
-                # wait for expand event to clear after forking the worker
+                worker_add_count = int(os.environ['EXPAND_BY'])
+                self.worker_count += worker_add_count
+                for id in range(worker_add_count):
+                    p = self.mpProcess(target=worker, args=(self.worker_count-1+id,
+                                                                    self.uid,
+                                                                    self.worker_count,
+                                                                    self.pending_task_queue,
+                                                                    self.pending_result_queue,
+                                                                    self.ready_worker_queue,
+                                                                    self._tasks_in_progress,
+                                                                    self.cpu_affinity,
+                                                                    expand_event,
+                                                                    None),
+                                            name="HTEX-Worker-{}".format(self.worker_count-1+id))
+                    p.start()
+                    self.procs[self.worker_count-1+id] = p
+                    logger.info("Worker {} has been started".format(self.worker_count-1+id))
+                    # wait for expand event to clear after forking the worker
                 while(expand_event.is_set()):
                     pass
 

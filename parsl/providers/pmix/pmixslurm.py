@@ -13,6 +13,7 @@ from parsl.providers.base import JobState, JobStatus
 from parsl.utils import wtime_to_minutes
 from parsl.providers.slurm.slurm import SlurmProvider
 from parsl.providers.pmix.templatepmix import template_string
+from parsl.providers.pmix.templateelasticpmix import template_elastic_string
 
 from parsl.channels import LocalChannel
 from parsl.channels.base import Channel
@@ -32,6 +33,7 @@ class PMIxSlurmProvider(SlurmProvider):
                  cores_per_node: Optional[int] = None,
                  mem_per_node: Optional[int] = None,
                  expand_at: Optional[int] = None,
+                 expand_by: Optional[int] = None,
                  init_blocks: int = 1,
                  min_blocks: int = 0,
                  max_blocks: int = 1,
@@ -66,6 +68,7 @@ class PMIxSlurmProvider(SlurmProvider):
                  launcher)
         
         self.expand_at = expand_at
+        self.expand_by = expand_by
         
     def submit(self, command, tasks_per_node, job_name="parsl.slurmpmix"):
         """Submit the command as a slurm job.
@@ -102,10 +105,14 @@ class PMIxSlurmProvider(SlurmProvider):
         script_path = "{0}/{1}.submit".format(self.script_dir, job_name)
         script_path = os.path.abspath(script_path)
 
+        worker_init += 'export USER_NODE_COUNT={}\n'.format(self.nodes_per_block)
+
         if(self.expand_at is not None):
-            # ask for one more nodes for DVM expansion
-            self.nodes_per_block = self.nodes_per_block + 1
             worker_init += 'export EXPAND_AT={}\n'.format(self.expand_at)
+            worker_init += 'export EXPAND_BY={}\n'.format(self.expand_by)
+            # ask for more nodes for DVM expansion
+            self.nodes_per_block = self.nodes_per_block + self.expand_by
+
 
         logger.debug("Requesting one block with {} nodes".format(self.nodes_per_block))
 
@@ -118,13 +125,19 @@ class PMIxSlurmProvider(SlurmProvider):
         job_config["worker_init"] = worker_init
         job_config["user_script"] = command
 
+        if(self.expand_at is not None):
+            job_config["expand_by"] = self.expand_by
+
         # Wrap the command
         job_config["user_script"] = self.launcher(command,
                                                   tasks_per_node,
                                                   self.nodes_per_block)
 
         logger.debug("Writing submit script")
-        self._write_submit_script(template_string, script_path, job_name, job_config)
+        if self.expand_at is not None:
+            self._write_submit_script(template_elastic_string, script_path, job_name, job_config)
+        else:
+            self._write_submit_script(template_string, script_path, job_name, job_config)
 
         if self.move_files:
             logger.debug("moving files")

@@ -208,6 +208,8 @@ class SlurmProvider(ClusterProvider, RepresentationMixin):
             scheduler_options += '#SBATCH --cpus-per-task={}'.format(cpus_per_task)
             worker_init += 'export PARSL_CORES={}\n'.format(cpus_per_task)
 
+        worker_init += 'export USER_NODE_COUNT={}\n'.format(self.nodes_per_block)
+
         job_name = "{0}.{1}".format(job_name, time.time())
 
         script_path = "{0}/{1}.submit".format(self.script_dir, job_name)

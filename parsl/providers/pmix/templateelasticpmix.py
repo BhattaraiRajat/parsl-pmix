@@ -1,4 +1,4 @@
-template_string = '''#!/bin/bash
+template_elastic_string = '''#!/bin/bash
 
 #SBATCH --job-name=${jobname}
 #SBATCH --output=${submit_script_dir}/${jobname}.submit.stdout
@@ -11,9 +11,14 @@ ${scheduler_options}
 ${worker_init}
 
 export JOBNAME="${jobname}"
+
 scontrol show hostnames > ${submit_script_dir}/hostfile
-export SCRIPT_DIR=${submit_script_dir}
+head -n -${expand_by} ${submit_script_dir}/hostfile > ${submit_script_dir}/truncated_hostfile
+tail -${expand_by} ${submit_script_dir}/hostfile > ${submit_script_dir}/add_hostfile
+export ADD_HOSTFILE=${submit_script_dir}/add_hostfile
 export NODES_COUNT=${nodes}
+export SCRIPT_DIR=${submit_script_dir}
+export TRUNCATED_HOSTFILE=${submit_script_dir}/truncated_hostfile
 export DVMURI=${submit_script_dir}/dvm.uri
 split --numeric-suffixes -l 1 ${submit_script_dir}/hostfile ${submit_script_dir}/hostfile
 
