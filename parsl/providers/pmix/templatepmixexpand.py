@@ -1,4 +1,4 @@
-template_elastic_string = '''#!/bin/bash
+template_expand_string = '''#!/bin/bash
 
 #SBATCH --job-name=${jobname}
 #SBATCH --output=${submit_script_dir}/${jobname}.submit.stdout
@@ -13,8 +13,9 @@ ${worker_init}
 export JOBNAME="${jobname}"
 
 scontrol show hostnames > ${submit_script_dir}/hostfile
-head -n -${expand_by} ${submit_script_dir}/hostfile > ${submit_script_dir}/truncated_hostfile
-tail -${expand_by} ${submit_script_dir}/hostfile > ${submit_script_dir}/add_hostfile
+head -n -${change_by} ${submit_script_dir}/hostfile > ${submit_script_dir}/truncated_hostfile
+tail -${change_by} ${submit_script_dir}/hostfile > ${submit_script_dir}/add_hostfile
+sed -i 's/.*/& slots=64/' "${submit_script_dir}/add_hostfile"
 export ADD_HOSTFILE=${submit_script_dir}/add_hostfile
 export NODES_COUNT=${nodes}
 export SCRIPT_DIR=${submit_script_dir}

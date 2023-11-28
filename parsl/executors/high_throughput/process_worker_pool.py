@@ -180,9 +180,11 @@ class Manager:
         if os.environ.get('DVMURI'):
             self.pmix_run = True
         
-        self.expand_at = None
-        if os.environ.get('EXPAND_AT'):
-            self.expand_at = int(os.environ.get('EXPAND_AT'))
+        self.change_at = None
+        self.change_type = None
+        if os.environ.get('CHANGE_AT'):
+            self.change_at = int(os.environ.get('CHANGE_AT'))
+            self.change_type = os.environ.get('CHANGE_TYPE')
 
         self.max_workers = max_workers
         self.prefetch_capacity = prefetch_capacity
@@ -256,7 +258,7 @@ class Manager:
         logger.debug("Sent heartbeat")
 
     @wrap_with_logs
-    def pull_tasks(self, kill_event, expand_event):
+    def pull_tasks(self, kill_event, change_event):
         """ Pull tasks from the incoming tasks zmq pipe onto the internal
         pending task queue
 
@@ -264,8 +266,8 @@ class Manager:
         -----------
         kill_event : threading.Event
               Event to let the thread know when it is time to die.
-        expand_event : threading.Event
-              Event to let the thread know when it is time to expand.
+        change_event : threading.Event
+              Event to let the thread know when it is time to change resources.
         """
         logger.info("starting")
         poller = zmq.Poller()
@@ -285,7 +287,7 @@ class Manager:
             ready_worker_count = self.ready_worker_queue.qsize()
             pending_task_count = self.pending_task_queue.qsize()
 
-            logger.debug("ready workers: {}, pending tasks: {}".format(ready_worker_count,
+            logger.info("ready workers: {}, pending tasks: {}".format(ready_worker_count,
                                                                        pending_task_count))
 
             if time.time() > last_beat + self.heartbeat_period:
@@ -310,16 +312,13 @@ class Manager:
 
                 else:
                     task_recv_counter += len(tasks)
-                    logger.debug("Got executor tasks: {}, cumulative count of tasks: {}".format([t['task_id'] for t in tasks], task_recv_counter))
+                    logger.info("Got executor tasks: {}, cumulative count of tasks: {}".format([t['task_id'] for t in tasks], task_recv_counter))
 
                     for task in tasks:
-                        if self.expand_at is not None:
-                            # when manager pulls this many tasks, start expand
-                            if(int(task['task_id']) == self.expand_at):
-                                expand_event.set()
                         self.pending_task_queue.put(task)
                         # logger.debug("Ready tasks: {}".format(
                         #    [i['task_id'] for i in self.pending_task_queue]))
+                
 
             else:
                 logger.debug("No incoming tasks")
@@ -337,15 +336,15 @@ class Manager:
                     break
 
     @wrap_with_logs
-    def push_results(self, kill_event, expand_event):
+    def push_results(self, kill_event, change_event):
         """ Listens on the pending_result_queue and sends out results via zmq
 
         Parameters:
         -----------
         kill_event : threading.Event
               Event to let the thread know when it is time to die.
-        expand_event : threading.Event
-              Event to let the thread know when it is time to expand.
+        change_event : threading.Event
+              Event to let the thread know when it is time to change resources.
         """
 
         logger.debug("Starting result push thread")
@@ -362,12 +361,12 @@ class Manager:
                 logger.debug("Starting pending_result_queue get")
                 r = self.pending_result_queue.get(block=True, timeout=push_poll_period)
 
-                if self.expand_at is not None:
+                if self.change_at is not None:
                     # check if expanding task done and clear expand flag to let other workers work
-                    if  expand_event.is_set():
+                    if  change_event.is_set():
                         result_after_expand = pickle.loads(r)
-                        if(int(result_after_expand['task_id']) == self.expand_at):
-                            expand_event.clear()
+                        if(int(result_after_expand['task_id']) == self.change_at):
+                            change_event.clear()
 
                 logger.debug("Got a result item")
                 items.append(r)
@@ -396,22 +395,28 @@ class Manager:
         logger.critical("Exiting")
 
     @wrap_with_logs
-    def worker_watchdog(self, kill_event, expand_event):
+    def worker_watchdog(self, kill_event, change_event):
         """Keeps workers alive.
 
         Parameters:
         -----------
         kill_event : threading.Event
               Event to let the thread know when it is time to die.
-        expand_event : threading.Event
-              Event to let the thread know when it is time to expand.
+        change_event : threading.Event
+              Event to let the thread know when it is time to change resources.
         """
 
         logger.debug("Starting worker watchdog")
 
         while not kill_event.is_set():
-            # self.procs may get modified while expanding, so use a copy
-            for worker_id, p in self.procs.copy().items():
+            while change_event.is_set():
+                pass
+            # self.procs may get modified while changing resources, so use a copy
+            current_procs = self.procs.copy()
+            for worker_id, p in current_procs.items():
+                if len(self.procs) != len(current_procs):
+                    logger.info("Worker change detected. Break")
+                    break
                 if not p.is_alive():
                     logger.error("Worker {} has died".format(worker_id))
                     try:
@@ -435,8 +440,8 @@ class Manager:
                                                             self.ready_worker_queue,
                                                             self._tasks_in_progress,
                                                             self.cpu_affinity,
-                                                            expand_event),
-                                       name="HTEX-Worker-{}".format(worker_id))
+                                                            change_event),
+                                    name="HTEX-Worker-{}".format(worker_id))
                     self.procs[worker_id] = p
                     logger.info("Worker {} has been restarted".format(worker_id))
                 time.sleep(self.heartbeat_period)
@@ -444,39 +449,58 @@ class Manager:
         logger.critical("Exiting")
 
     @wrap_with_logs
-    def worker_expand(self, kill_event, expand_event):
-        """Increase number of workers.
+    def worker_change(self, kill_event, change_event):
+        """Change number of workers.
 
         Parameters:
         -----------
         kill_event : threading.Event
               Event to let the thread know when it is time to die.
-        expand_event : threading.Event
-              Event to let the thread know when it is time to increase workers.
+        change_event : threading.Event
+              Event to let the thread know when it is time to change resources.
         """
 
         while not kill_event.is_set():
-            if expand_event.is_set():
-                logger.debug("Starting worker Expand")
-                worker_add_count = int(os.environ['EXPAND_BY'])
-                self.worker_count += worker_add_count
-                for id in range(worker_add_count):
-                    p = self.mpProcess(target=worker, args=(self.worker_count-1+id,
-                                                                    self.uid,
-                                                                    self.worker_count,
-                                                                    self.pending_task_queue,
-                                                                    self.pending_result_queue,
-                                                                    self.ready_worker_queue,
-                                                                    self._tasks_in_progress,
-                                                                    self.cpu_affinity,
-                                                                    expand_event,
-                                                                    None),
-                                            name="HTEX-Worker-{}".format(self.worker_count-1+id))
-                    p.start()
-                    self.procs[self.worker_count-1+id] = p
-                    logger.info("Worker {} has been started".format(self.worker_count-1+id))
-                    # wait for expand event to clear after forking the worker
-                while(expand_event.is_set()):
+            if change_event.is_set():
+                worker_change_count = int(os.environ['CHANGE_BY'])
+                old_worker_count = self.worker_count
+                if self.change_type=="expand":
+                    logger.info("Starting worker pool expansion")
+                    self.worker_count += worker_change_count
+                    for id in range(worker_change_count):
+                        p = self.mpProcess(target=worker, args=(old_worker_count+id,
+                                                                        self.uid,
+                                                                        self.worker_count,
+                                                                        self.pending_task_queue,
+                                                                        self.pending_result_queue,
+                                                                        self.ready_worker_queue,
+                                                                        self._tasks_in_progress,
+                                                                        self.cpu_affinity,
+                                                                        change_event,
+                                                                        None),
+                                                name="HTEX-Worker-{}".format(old_worker_count+id))
+                        p.start()
+                        self.procs[old_worker_count+id] = p
+                        logger.info("Worker {} has been started".format(old_worker_count+id))
+                elif self.change_type=="shrink":
+                    logger.info("Starting worker pool shrinkage")
+                    self.worker_count = self.worker_count - worker_change_count
+                    os.environ['PARSL_WORKER_COUNT'] = str(self.worker_count)
+                    worker_id = old_worker_count
+                    while(worker_change_count>0):
+                        worker_id = worker_id - 1
+                        while worker_id in self._tasks_in_progress.keys():
+                            pass
+                        self.procs[worker_id].terminate()
+                        self.procs[worker_id].join()
+                        logger.info("Worker {} joined successfully".format(self.procs[worker_id]))
+                        self.procs.pop(worker_id)
+                        worker_change_count=worker_change_count-1
+                else:
+                    print("Options incorrect for resource changes. Exiting")
+                    exit(6)
+                # wait for expand event to clear after forking the worker
+                while(change_event.is_set()):
                     pass
 
     @wrap_with_logs
@@ -485,7 +509,7 @@ class Manager:
         local_env = os.environ.copy()
         envs = copy.deepcopy(local_env)
         dvm_path = os.environ['DVMURI']
-        if self.expand_at is not None:
+        if self.change_at is not None and self.change_type=="expand":
             hostfile_dir = os.environ['TRUNCATED_HOSTFILE']
         else:
             script_dir = os.environ['SCRIPT_DIR']
@@ -523,7 +547,7 @@ class Manager:
         """
         start = time.time()
         self._kill_event = threading.Event()
-        self._expand_event = multiprocessing.Event()
+        self._change_event = multiprocessing.Event()
         self._tasks_in_progress = multiprocessing.Manager().dict()
 
         if self.pmix_run:
@@ -541,7 +565,7 @@ class Manager:
                                      self.ready_worker_queue,
                                      self._tasks_in_progress,
                                      self.cpu_affinity,
-                                     self._expand_event,
+                                     self._change_event,
                                      self.available_accelerators[worker_id] if self.accelerators_available else None),
                                name="HTEX-Worker-{}".format(worker_id))
             p.start()
@@ -550,31 +574,31 @@ class Manager:
         logger.debug("Workers started")
 
         self._task_puller_thread = threading.Thread(target=self.pull_tasks,
-                                                    args=(self._kill_event,self._expand_event),
+                                                    args=(self._kill_event,self._change_event),
                                                     name="Task-Puller")
         self._result_pusher_thread = threading.Thread(target=self.push_results,
-                                                      args=(self._kill_event, self._expand_event),
+                                                      args=(self._kill_event, self._change_event),
                                                       name="Result-Pusher")
         self._worker_watchdog_thread = threading.Thread(target=self.worker_watchdog,
-                                                        args=(self._kill_event, self._expand_event),
+                                                        args=(self._kill_event, self._change_event),
                                                         name="worker-watchdog")
-        if self.expand_at is not None:
-            self._worker_expand_thread = threading.Thread(target=self.worker_expand,
-                                                            args=(self._kill_event, self._expand_event),
+        if self.change_at is not None:
+            self._worker_change_thread = threading.Thread(target=self.worker_change,
+                                                            args=(self._kill_event, self._change_event),
                                                             name="worker-expand")
         self._task_puller_thread.start()
         self._result_pusher_thread.start()
         self._worker_watchdog_thread.start()
-        if self.expand_at is not None:
-            self._worker_expand_thread.start()
+        if self._change_event is not None:
+            self._worker_change_thread.start()
 
         logger.info("Loop start")
 
         # TODO : Add mechanism in this loop to stop the worker pool
         # This might need a multiprocessing event to signal back.
-        if self.expand_at is not None:
-            self._expand_event.wait()
-            logger.info("Received expand event, expanding worker pool")
+        if self.change_at is not None:
+            self._change_event.wait()
+            logger.info("Received resource change event, changing size of worker pool")
 
         self._kill_event.wait()
         logger.critical("Received kill event, terminating worker pool")
@@ -583,8 +607,8 @@ class Manager:
         self._result_pusher_thread.join()
         self._worker_watchdog_thread.join()
 
-        if self.expand_at is not None:
-            self._worker_expand_thread.join()
+        if self.change_at is not None:
+            self._worker_change_thread.join()
 
         for proc_id in self.procs:
             self.procs[proc_id].terminate()
@@ -633,7 +657,7 @@ def execute_task(bufs):
 
 
 @wrap_with_logs(target="worker_log")
-def worker(worker_id, pool_id, pool_size, task_queue, result_queue, worker_queue, tasks_in_progress, cpu_affinity, expand_event, accelerator: Optional[str]):
+def worker(worker_id, pool_id, pool_size, task_queue, result_queue, worker_queue, tasks_in_progress, cpu_affinity, change_event, accelerator: Optional[str]):
     """
 
     Put request token into queue
@@ -703,9 +727,9 @@ def worker(worker_id, pool_id, pool_size, task_queue, result_queue, worker_queue
         logger.info(f'Pinned worker to accelerator: {accelerator}')
 
     while True:
-        if expand_event.is_set():
-            logger.info("Waiting for expand event to finish from worker {}".format(worker_id))
-            while(expand_event.is_set()):
+        if change_event.is_set():
+            logger.info("Waiting for change event to finish from worker {}".format(worker_id))
+            while(change_event.is_set()):
                 pass
         else:
             worker_queue.put(worker_id)
@@ -715,9 +739,10 @@ def worker(worker_id, pool_id, pool_size, task_queue, result_queue, worker_queue
             tasks_in_progress[worker_id] = req
             tid = req['task_id']
 
-            if os.environ.get("EXPAND_AT"):
+            if os.environ.get("CHANGE_AT"):
                 # run add-hostfile task alone
-                if(int(tid)==int(os.environ.get("EXPAND_AT"))):
+                if(int(tid)==int(os.environ.get("CHANGE_AT"))):
+                    change_event.set()
                     logger.info("Waiting for task {0} to run alone from worker {1}".format(tid, worker_id))
                     while(len(tasks_in_progress) != 1):
                         pass

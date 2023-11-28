@@ -81,14 +81,19 @@ def remote_side_bash_executor(func, *args, **kwargs):
         prun_command = "prun --dvm-uri file:{0} --map-by :OVERSUBSCRIBE --hostfile {1} ".format(dvm_path, hostfile_path)
 
         # expand after certain task
-        if os.environ.get('EXPAND_AT'):
-            expand_at_task = int(os.environ.get('EXPAND_AT'))
-            if task_id == expand_at_task:
+        if os.environ.get('CHANGE_AT'):
+            res_change_at_task = int(os.environ.get('CHANGE_AT'))
+            if task_id == res_change_at_task:
                 add_hostfile_path = "{0}/add_hostfile".format(script_dir)
-                prun_command = "prun --dvm-uri file:{0} --map-by :OVERSUBSCRIBE --add-hostfile {1} --hostfile {1} ".format(dvm_path, add_hostfile_path)
-            if task_id > expand_at_task:
+                prun_command = "prun --dvm-uri file:{0} --add-hostfile {1} ".format(dvm_path, add_hostfile_path)
+            if task_id > res_change_at_task:
                 nodes_count = int(os.environ.get('NODES_COUNT'))
-                hostfile_index=task_id%nodes_count
+                change_by = int(os.environ.get('CHANGE_BY'))
+                change_type = os.environ.get('CHANGE_TYPE')
+                if change_type=="expand":
+                    hostfile_index=task_id%nodes_count
+                else:
+                    hostfile_index=task_id%(nodes_count-change_by)
                 file_name = "hostfile0{0}".format(hostfile_index)
                 hostfile_path = "{0}/{1}".format(script_dir, file_name)
                 prun_command = "prun --dvm-uri file:{0} --map-by :OVERSUBSCRIBE --hostfile {1} ".format(dvm_path, hostfile_path)  
