@@ -83,9 +83,6 @@ def remote_side_bash_executor(func, *args, **kwargs):
         # expand after certain task
         if os.environ.get('CHANGE_AT'):
             res_change_at_task = int(os.environ.get('CHANGE_AT'))
-            if task_id == res_change_at_task:
-                add_hostfile_path = "{0}/add_hostfile".format(script_dir)
-                prun_command = "prun --dvm-uri file:{0} --add-hostfile {1} ".format(dvm_path, add_hostfile_path)
             if task_id > res_change_at_task:
                 nodes_count = int(os.environ.get('NODES_COUNT'))
                 change_by = int(os.environ.get('CHANGE_BY'))
@@ -97,7 +94,6 @@ def remote_side_bash_executor(func, *args, **kwargs):
                 file_name = "hostfile0{0}".format(hostfile_index)
                 hostfile_path = "{0}/{1}".format(script_dir, file_name)
                 prun_command = "prun --dvm-uri file:{0} --map-by :OVERSUBSCRIBE --hostfile {1} ".format(dvm_path, hostfile_path)  
-
         executable = executable.replace("prun ", prun_command)
 
     if "mpirun " in executable:

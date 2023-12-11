@@ -284,12 +284,6 @@ class Manager:
         poll_timer = self.poll_period
 
         while not kill_event.is_set():
-            ready_worker_count = self.ready_worker_queue.qsize()
-            pending_task_count = self.pending_task_queue.qsize()
-
-            logger.info("ready workers: {}, pending tasks: {}".format(ready_worker_count,
-                                                                       pending_task_count))
-
             if time.time() > last_beat + self.heartbeat_period:
                 self.heartbeat_to_incoming()
                 last_beat = time.time()
@@ -312,7 +306,6 @@ class Manager:
 
                 else:
                     task_recv_counter += len(tasks)
-                    logger.info("Got executor tasks: {}, cumulative count of tasks: {}".format([t['task_id'] for t in tasks], task_recv_counter))
 
                     for task in tasks:
                         self.pending_task_queue.put(task)
@@ -360,13 +353,6 @@ class Manager:
             try:
                 logger.debug("Starting pending_result_queue get")
                 r = self.pending_result_queue.get(block=True, timeout=push_poll_period)
-
-                if self.change_at is not None:
-                    # check if expanding task done and clear expand flag to let other workers work
-                    if  change_event.is_set():
-                        result_after_expand = pickle.loads(r)
-                        if(int(result_after_expand['task_id']) == self.change_at):
-                            change_event.clear()
 
                 logger.debug("Got a result item")
                 items.append(r)
@@ -501,7 +487,7 @@ class Manager:
                     exit(6)
                 # wait for expand event to clear after forking the worker
                 while(change_event.is_set()):
-                    pass
+                    pass         
 
     @wrap_with_logs
     def start_dvm(self):
@@ -589,7 +575,7 @@ class Manager:
         self._task_puller_thread.start()
         self._result_pusher_thread.start()
         self._worker_watchdog_thread.start()
-        if self._change_event is not None:
+        if self.change_at is not None:
             self._worker_change_thread.start()
 
         logger.info("Loop start")
@@ -740,12 +726,25 @@ def worker(worker_id, pool_id, pool_size, task_queue, result_queue, worker_queue
             tid = req['task_id']
 
             if os.environ.get("CHANGE_AT"):
-                # run add-hostfile task alone
+                # execute change resources with add-hostfile dummy task alone
                 if(int(tid)==int(os.environ.get("CHANGE_AT"))):
                     change_event.set()
-                    logger.info("Waiting for task {0} to run alone from worker {1}".format(tid, worker_id))
+                    logger.info("Waiting for dummy expand task to run alone from worker {1}".format(tid, worker_id))
                     while(len(tasks_in_progress) != 1):
                         pass
+                    # execute the change first with dummy task
+                    dvm_path = os.environ['DVMURI']
+                    script_dir = os.environ['SCRIPT_DIR']
+                    add_hostfile_path = "{0}/add_hostfile".format(script_dir)
+                    cmd =  "prun --dvm-uri file:{0} --add-hostfile {1} -np 2 hostname".format(dvm_path, add_hostfile_path)
+                    logger.info("Execute the change")
+                    logger.info(cmd)
+                    proc = subprocess.run(
+                        cmd,
+                        shell=True
+                    )
+                    # clear change event
+                    change_event.clear()
             
             logger.info("Received executor task {}".format(tid))
 
