@@ -68,37 +68,10 @@ def remote_side_bash_executor(func, *args, **kwargs):
     std_err = open_std_fd('stderr')
     timeout = kwargs.get('walltime')
 
-    # manual mapping nodes to task example, mpi runtime, prrte and parsl do not have scheduler for mapping tasks to node
-    user_nodes_count = int(os.environ.get('USER_NODE_COUNT'))
-    script_dir = os.environ.get('SCRIPT_DIR')
-    task_id = int(args[1])
-    hostfile_index=task_id%user_nodes_count
-    file_name = "hostfile0{0}".format(hostfile_index)
-    hostfile_path = "{0}/{1}".format(script_dir, file_name)
-
-    if os.environ.get('DVMURI'):
+    if "prun" in executable:
         dvm_path = os.environ.get('DVMURI')
-        prun_command = "prun --dvm-uri file:{0} --map-by :OVERSUBSCRIBE --hostfile {1} ".format(dvm_path, hostfile_path)
-
-        # expand after certain task
-        if os.environ.get('CHANGE_AT'):
-            res_change_at_task = int(os.environ.get('CHANGE_AT'))
-            if task_id > res_change_at_task:
-                nodes_count = int(os.environ.get('NODES_COUNT'))
-                change_by = int(os.environ.get('CHANGE_BY'))
-                change_type = os.environ.get('CHANGE_TYPE')
-                if change_type=="expand":
-                    hostfile_index=task_id%nodes_count
-                else:
-                    hostfile_index=task_id%(nodes_count-change_by)
-                file_name = "hostfile0{0}".format(hostfile_index)
-                hostfile_path = "{0}/{1}".format(script_dir, file_name)
-                prun_command = "prun --dvm-uri file:{0} --map-by :OVERSUBSCRIBE --hostfile {1} ".format(dvm_path, hostfile_path)  
+        prun_command = "prun --dvm-uri file:{0} ".format(dvm_path)
         executable = executable.replace("prun ", prun_command)
-
-    if "mpirun " in executable:
-        mpirun_command = "mpirun --map-by :OVERSUBSCRIBE --hostfile {0} ".format(hostfile_path)
-        executable = executable.replace("mpirun ", mpirun_command)
 
     if std_err is not None:
         print('--> executable follows <--\n{0}\n--> end executable <--'.format(executable), file=std_err, flush=True)

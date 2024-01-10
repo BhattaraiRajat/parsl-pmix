@@ -179,12 +179,9 @@ class Manager:
         self.pmix_run = False
         if os.environ.get('DVMURI'):
             self.pmix_run = True
-        
-        self.change_at = None
+
         self.change_type = None
-        if os.environ.get('CHANGE_AT'):
-            self.change_at = int(os.environ.get('CHANGE_AT'))
-            self.change_type = os.environ.get('CHANGE_TYPE')
+        self.change_by= None
 
         self.max_workers = max_workers
         self.prefetch_capacity = prefetch_capacity
@@ -214,6 +211,9 @@ class Manager:
         self.ready_worker_queue = mpQueue()
 
         self.max_queue_size = self.prefetch_capacity + self.worker_count
+
+        # store which result is being processed now
+        self.last_result_task = 0
 
         self.tasks_per_round = 1
 
@@ -354,6 +354,9 @@ class Manager:
                 logger.debug("Starting pending_result_queue get")
                 r = self.pending_result_queue.get(block=True, timeout=push_poll_period)
 
+                result_after_expand = pickle.loads(r)
+                self.last_result_task = result_after_expand['task_id']
+
                 logger.debug("Got a result item")
                 items.append(r)
             except queue.Empty:
@@ -448,10 +451,10 @@ class Manager:
 
         while not kill_event.is_set():
             if change_event.is_set():
-                worker_change_count = int(os.environ['CHANGE_BY'])
+                worker_change_count = self.change_by
                 old_worker_count = self.worker_count
                 if self.change_type=="expand":
-                    logger.info("Starting worker pool expansion")
+                    logger.info("Starting worker pool expansion by {}".format(worker_change_count))
                     self.worker_count += worker_change_count
                     for id in range(worker_change_count):
                         p = self.mpProcess(target=worker, args=(old_worker_count+id,
@@ -484,10 +487,89 @@ class Manager:
                         worker_change_count=worker_change_count-1
                 else:
                     print("Options incorrect for resource changes. Exiting")
-                    exit(6)
-                # wait for expand event to clear after forking the worker
+                    exit(6) 
+
                 while(change_event.is_set()):
-                    pass         
+                    pass
+
+    @wrap_with_logs
+    def trigger_change_event(self, kill_event, change_event, start):
+        """Trigger Change Event.
+
+        Parameters:
+        -----------
+        kill_event : threading.Event
+              Event to let the thread know when it is time to die.
+        change_event : threading.Event
+              Event to let the thread know when it is time to change resources.
+        start : start time
+        """
+        target_time = int(os.environ['WALLTIME']) * 60
+        total_tasks = int(os.environ['TOTAL_TASKS'])
+        script_dir = os.environ['SCRIPT_DIR']
+        extra_hostfile = "{0}/extra_hostfile".format(script_dir)
+        dvm_hostfile = "{0}/dvm_hostfile".format(script_dir)
+        add_hostfile = "{0}/add_hostfile".format(script_dir)
+        last_last_result_task = 0
+        logger.info(f"Starting Throughput Monitoring")
+        logger.info(f"Target Walltime: {target_time} seconds for {total_tasks} tasks")
+        while not kill_event.is_set():
+            time.sleep(10)
+            if(self.last_result_task != last_last_result_task):
+                delta = time.time() - start
+                logger.info(f"done {self.last_result_task} tasks in {delta} seconds")
+                current_throughput = self.last_result_task / delta
+                makespan_one_task = delta / (self.last_result_task/self.max_workers)
+                remaining_tasks = total_tasks-self.last_result_task
+                estimated_completion_time = (remaining_tasks/current_throughput + delta)
+                logger.info(f"Estimated Completion time : {estimated_completion_time} seconds")
+                
+                new_nodes = int(remaining_tasks * makespan_one_task /(0.8*target_time - delta))
+                logger.info(f"Expected New Workers Count: {new_nodes}")
+
+                if(estimated_completion_time > 0.9*target_time): # make logic when to expand
+                    self.change_type="expand"
+                    nodes_to_add = 0 if new_nodes < self.max_workers else (new_nodes - self.max_workers)
+                    self.change_by = self.max_workers if nodes_to_add > self.max_workers else nodes_to_add
+                    logger.info(f"Actual Workers to add: {self.change_by}")
+                    # make add hostfile
+                    try:
+                        with open(extra_hostfile, 'r') as input_file:
+                            with open(add_hostfile, 'w') as output_file:
+                                lines_to_write = [next(input_file) for _ in range(self.change_by)]
+                                for line in lines_to_write:
+                                    line_with_slots = f"{line.strip()} slots=64\n"
+                                    output_file.write(line_with_slots)
+                    except FileNotFoundError:
+                        print("File not found. Please check the file paths.")
+                    except Exception as e:
+                        print(f"An error occurred: {e}")
+
+                if(estimated_completion_time < 0.7*target_time): # make logic when to shrink
+                    self.change_type="shrink"
+                    nodes_to_remove = 0 if new_nodes>self.max_workers else (self.max_workers-new_nodes)
+                    self.change_by = (self.max_workers-1) if nodes_to_remove >= self.max_workers else nodes_to_remove
+                    logger.info(f"Actual Workers to remove: {self.change_by}")
+                    # make add hostfile
+                    try:
+                        with open(dvm_hostfile, 'r') as input_file:
+                            with open(add_hostfile, 'w') as output_file:
+                                all_lines = input_file.readlines()
+                                for line in all_lines[-self.change_by:]:
+                                    line = line.replace(" slots=", " slots=-")
+                                    output_file.write(line)
+                    except FileNotFoundError:
+                        print("File not found. Please check the file paths.")
+                    except Exception as e:
+                        print(f"An error occurred: {e}")
+                
+                last_last_result_task = self.last_result_task          
+                                    
+                if(self.change_by!=0):
+                    change_event.set()
+                    break
+                else:
+                    continue
 
     @wrap_with_logs
     def start_dvm(self):
@@ -495,11 +577,8 @@ class Manager:
         local_env = os.environ.copy()
         envs = copy.deepcopy(local_env)
         dvm_path = os.environ['DVMURI']
-        if self.change_at is not None and self.change_type=="expand":
-            hostfile_dir = os.environ['TRUNCATED_HOSTFILE']
-        else:
-            script_dir = os.environ['SCRIPT_DIR']
-            hostfile_dir = "{0}/hostfile".format(script_dir)
+        script_dir = os.environ['SCRIPT_DIR']
+        hostfile_dir = "{0}/dvm_hostfile".format(script_dir)
         cmd =  "prte --report-uri {0} --hostfile {1} --prtemca plm ^slurm --daemonize".format(dvm_path, hostfile_dir)
         logger.info(cmd)
         proc = subprocess.run(
@@ -568,23 +647,25 @@ class Manager:
         self._worker_watchdog_thread = threading.Thread(target=self.worker_watchdog,
                                                         args=(self._kill_event, self._change_event),
                                                         name="worker-watchdog")
-        if self.change_at is not None:
+        
+        if self.pmix_run:
             self._worker_change_thread = threading.Thread(target=self.worker_change,
-                                                            args=(self._kill_event, self._change_event),
-                                                            name="worker-expand")
+                                                                args=(self._kill_event, self._change_event),
+                                                                name="worker-expand")
+            self._trigger_change_thread = threading.Thread(target=self.trigger_change_event,
+                                                                args=(self._kill_event, self._change_event, start),
+                                                                name="trigger-change")
         self._task_puller_thread.start()
         self._result_pusher_thread.start()
         self._worker_watchdog_thread.start()
-        if self.change_at is not None:
+        if self.pmix_run:
+            self._trigger_change_thread.start()
             self._worker_change_thread.start()
 
         logger.info("Loop start")
 
         # TODO : Add mechanism in this loop to stop the worker pool
         # This might need a multiprocessing event to signal back.
-        if self.change_at is not None:
-            self._change_event.wait()
-            logger.info("Received resource change event, changing size of worker pool")
 
         self._kill_event.wait()
         logger.critical("Received kill event, terminating worker pool")
@@ -593,8 +674,9 @@ class Manager:
         self._result_pusher_thread.join()
         self._worker_watchdog_thread.join()
 
-        if self.change_at is not None:
+        if self.pmix_run:
             self._worker_change_thread.join()
+            self._trigger_change_thread.join()
 
         for proc_id in self.procs:
             self.procs[proc_id].terminate()
@@ -611,7 +693,6 @@ class Manager:
         delta = time.time() - start
         logger.info("process_worker_pool ran for {} seconds".format(delta))
         return
-
 
 def execute_task(bufs):
     """Deserialize the buffer and execute the task.
@@ -714,9 +795,24 @@ def worker(worker_id, pool_id, pool_size, task_queue, result_queue, worker_queue
 
     while True:
         if change_event.is_set():
-            logger.info("Waiting for change event to finish from worker {}".format(worker_id))
-            while(change_event.is_set()):
-                pass
+            if(worker_id==0):
+                logger.info("Executing resource change in DVM")
+                # wait for dummy tasks to run alone
+                while(len(tasks_in_progress)!=0):
+                    pass
+                dvm_path = os.environ['DVMURI']
+                script_dir = os.environ['SCRIPT_DIR']
+                add_hostfile_path = "{0}/add_hostfile".format(script_dir)
+                cmd =  "prun --dvm-uri file:{0} --add-hostfile {1} -np 2 hostname".format(dvm_path, add_hostfile_path)
+                # run dummy tasks
+                logger.info(cmd)
+                proc = subprocess.run(cmd, shell=True)
+                # clear change event
+                change_event.clear() 
+            else:
+                logger.info("Waiting for change event to finish from worker {}".format(worker_id))
+                while(change_event.is_set()):
+                    pass
         else:
             worker_queue.put(worker_id)
 
@@ -724,27 +820,6 @@ def worker(worker_id, pool_id, pool_size, task_queue, result_queue, worker_queue
             req = task_queue.get()
             tasks_in_progress[worker_id] = req
             tid = req['task_id']
-
-            if os.environ.get("CHANGE_AT"):
-                # execute change resources with add-hostfile dummy task alone
-                if(int(tid)==int(os.environ.get("CHANGE_AT"))):
-                    change_event.set()
-                    logger.info("Waiting for dummy expand task to run alone from worker {1}".format(tid, worker_id))
-                    while(len(tasks_in_progress) != 1):
-                        pass
-                    # execute the change first with dummy task
-                    dvm_path = os.environ['DVMURI']
-                    script_dir = os.environ['SCRIPT_DIR']
-                    add_hostfile_path = "{0}/add_hostfile".format(script_dir)
-                    cmd =  "prun --dvm-uri file:{0} --add-hostfile {1} -np 2 hostname".format(dvm_path, add_hostfile_path)
-                    logger.info("Execute the change")
-                    logger.info(cmd)
-                    proc = subprocess.run(
-                        cmd,
-                        shell=True
-                    )
-                    # clear change event
-                    change_event.clear()
             
             logger.info("Received executor task {}".format(tid))
 

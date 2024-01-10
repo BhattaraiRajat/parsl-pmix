@@ -13,8 +13,6 @@ from parsl.providers.base import JobState, JobStatus
 from parsl.utils import wtime_to_minutes
 from parsl.providers.slurm.slurm import SlurmProvider
 from parsl.providers.pmix.templatepmix import template_string
-from parsl.providers.pmix.templatepmixexpand import template_expand_string
-from parsl.providers.pmix.templatepmixshrink import template_shrink_string
 
 from parsl.channels import LocalChannel
 from parsl.channels.base import Channel
@@ -22,7 +20,7 @@ from parsl.launchers import SingleNodeLauncher
 
 logger = logging.getLogger(__name__)
 
-class PMIxSlurmProvider(SlurmProvider):
+class PMIxProvider(SlurmProvider):
     """PMIx Slurm Execution Provider
     """
     @typeguard.typechecked
@@ -33,13 +31,11 @@ class PMIxSlurmProvider(SlurmProvider):
                  nodes_per_block: int = 1,
                  cores_per_node: Optional[int] = None,
                  mem_per_node: Optional[int] = None,
-                 res_change_at: Optional[int] = None,
-                 res_change_by: Optional[int] = None,
-                 res_change_type: Optional[str] = None,
                  init_blocks: int = 1,
                  min_blocks: int = 0,
                  max_blocks: int = 1,
                  parallelism: float = 1,
+                 estimated_tasks = 1,
                  walltime: str = "00:10:00",
                  scheduler_options: str = '',
                  regex_job_id: str = r"Submitted batch job (?P<id>\S*)",
@@ -69,10 +65,8 @@ class PMIxSlurmProvider(SlurmProvider):
                  move_files,
                  launcher)
         
-        self.res_change_at = res_change_at
-        self.res_change_by = res_change_by
-        self.res_change_type = res_change_type
-        
+        self.estimated_tasks = estimated_tasks
+
     def submit(self, command, tasks_per_node, job_name="parsl.slurmpmix"):
         """Submit the command as a slurm job.
 
@@ -102,21 +96,16 @@ class PMIxSlurmProvider(SlurmProvider):
 
         worker_init += 'export OMPI_MCA_pml=^ucx\n'
         worker_init += 'export PRTE_MCA_ras=simulator\n'
+        worker_init += 'export TOTAL_TASKS={}\n'.format(self.estimated_tasks)
 
         job_name = "{0}.{1}".format(job_name, time.time())
 
         script_path = "{0}/{1}.submit".format(self.script_dir, job_name)
         script_path = os.path.abspath(script_path)
 
-        worker_init += 'export USER_NODE_COUNT={}\n'.format(self.nodes_per_block)
-
-        if(self.res_change_at is not None):
-            worker_init += 'export CHANGE_AT={}\n'.format(self.res_change_at)
-            worker_init += 'export CHANGE_BY={}\n'.format(self.res_change_by)
-            worker_init += 'export CHANGE_TYPE={}\n'.format(self.res_change_type)
-            # ask for more nodes for DVM expansion
-            if(self.res_change_type=="expand"):
-                self.nodes_per_block = self.nodes_per_block + self.res_change_by
+        # start with preallocated pool of double nodes
+        user_nodes = self.nodes_per_block
+        self.nodes_per_block = 2 * self.nodes_per_block
 
 
         logger.debug("Requesting one block with {} nodes".format(self.nodes_per_block))
@@ -130,8 +119,8 @@ class PMIxSlurmProvider(SlurmProvider):
         job_config["worker_init"] = worker_init
         job_config["user_script"] = command
 
-        if(self.res_change_at is not None):
-            job_config["change_by"] = self.res_change_by
+        job_config["extra_nodes"] = self.nodes_per_block-user_nodes
+        job_config["user_nodes"] = user_nodes
 
         # Wrap the command
         job_config["user_script"] = self.launcher(command,
@@ -139,12 +128,8 @@ class PMIxSlurmProvider(SlurmProvider):
                                                   self.nodes_per_block)
 
         logger.debug("Writing submit script")
-        if self.res_change_type == "expand":
-            self._write_submit_script(template_expand_string, script_path, job_name, job_config)
-        elif self.res_change_type == "shrink":
-            self._write_submit_script(template_shrink_string, script_path, job_name, job_config)
-        else:
-            self._write_submit_script(template_string, script_path, job_name, job_config)
+
+        self._write_submit_script(template_string, script_path, job_name, job_config)
 
         if self.move_files:
             logger.debug("moving files")
